@@ -69,9 +69,8 @@ const uploadFile = async (file, req) => {
   const filePath = path.join(uploadsDir, uniqueName);
   fs.writeFileSync(filePath, file.buffer);
 
-  const protocol = req.protocol || "http";
-  const host = req.get("host") || "localhost:5000";
-  const fileUrl = `${protocol}://${host}/uploads/${uniqueName}`;
+  const backendBase = process.env.BACKEND_URL || `${req.protocol || "http"}://${req.get("host") || "localhost:5000"}`;
+  const fileUrl = `${backendBase}/uploads/${uniqueName}`;
 
   return {
     url: fileUrl,

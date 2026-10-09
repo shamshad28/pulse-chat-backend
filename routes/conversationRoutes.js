@@ -8,6 +8,8 @@ const {
   removeGroupMember,
   toggleAdminRole,
   updateGroupSettings,
+  deleteConversation,
+  clearConversationMessages,
 } = require("../controllers/conversationController");
 const protect = require("../middleware/authMiddleware");
 
@@ -20,6 +22,9 @@ router.post("/group", createGroupConversation);
 router.get("/", getMyConversations);
 router.get("/:conversationId", getConversationById);
 router.put("/:conversationId", updateGroupSettings);
+router.delete("/:conversationId", deleteConversation);
+router.delete("/:conversationId/messages", clearConversationMessages);
+router.post("/:conversationId/clear", clearConversationMessages);
 router.post("/:conversationId/members", addGroupMembers);
 router.delete("/:conversationId/members/:userId", removeGroupMember);
 router.put("/:conversationId/admins", toggleAdminRole);

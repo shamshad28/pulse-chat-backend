@@ -5,6 +5,7 @@ const {
   toggleReaction,
   markConversationAsRead,
   searchMessages,
+  deleteMessage,
 } = require("../controllers/messageController");
 const protect = require("../middleware/authMiddleware");
 
@@ -17,5 +18,6 @@ router.post("/", sendMessage);
 router.get("/:conversationId", getMessages);
 router.put("/:conversationId/read", markConversationAsRead);
 router.post("/:messageId/reactions", toggleReaction);
+router.delete("/:messageId", deleteMessage);
 
 module.exports = router;

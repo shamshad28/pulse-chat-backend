@@ -400,10 +400,71 @@ const searchMessages = async (req, res) => {
   }
 };
 
+// Delete a single message
+const deleteMessage = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found",
+      });
+    }
+
+    const conversation = await Conversation.findById(message.conversation);
+    const isSender = message.sender.toString() === req.user._id.toString();
+    const isGroupAdmin =
+      conversation?.type === "group" &&
+      conversation?.admins?.some((a) => a.toString() === req.user._id.toString());
+
+    if (!isSender && !isGroupAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only delete your own messages",
+      });
+    }
+
+    const conversationId = message.conversation.toString();
+    await Message.findByIdAndDelete(messageId);
+
+    // If deleted message was lastMessage, update conversation
+    if (conversation && conversation.lastMessage?.toString() === messageId.toString()) {
+      const latestMsg = await Message.findOne({ conversation: conversationId }).sort({
+        createdAt: -1,
+      });
+      conversation.lastMessage = latestMsg?._id || null;
+      await conversation.save();
+    }
+
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`conversation:${conversationId}`).emit("message:deleted", {
+        messageId,
+        conversationId,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Message deleted successfully",
+      messageId,
+      conversationId,
+    });
+  } catch (error) {
+    console.error("Delete message error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error deleting message",
+    });
+  }
+};
+
 module.exports = {
   sendMessage,
   getMessages,
   toggleReaction,
   markConversationAsRead,
   searchMessages,
+  deleteMessage,
 };

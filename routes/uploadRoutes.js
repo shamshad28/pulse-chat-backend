@@ -16,7 +16,18 @@ const upload = multer({
 router.post(
   "/",
   protect,
-  upload.array("files", 10),
+  (req, res, next) => {
+    upload.array("files", 10)(req, res, (err) => {
+      if (err) {
+        console.error("Multer upload error:", err);
+        return res.status(400).json({
+          success: false,
+          message: err.message || "File upload error",
+        });
+      }
+      next();
+    });
+  },
   async (req, res) => {
     try {
       if (!req.files || req.files.length === 0) {

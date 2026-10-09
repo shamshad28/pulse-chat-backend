@@ -524,6 +524,109 @@ const updateGroupSettings = async (req, res) => {
   }
 };
 
+// Delete entire conversation and all its messages
+const deleteConversation = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        message: "Conversation not found",
+      });
+    }
+
+    const isMember = conversation.members.some(
+      (m) => m.toString() === req.user._id.toString()
+    );
+    if (!isMember) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not a member of this conversation",
+      });
+    }
+
+    const memberIds = [...conversation.members];
+
+    // Delete all messages in the conversation
+    await Message.deleteMany({ conversation: conversationId });
+
+    // Delete the conversation document
+    await Conversation.findByIdAndDelete(conversationId);
+
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`conversation:${conversationId}`).emit("conversation:deleted", {
+        conversationId,
+      });
+      memberIds.forEach((mId) => {
+        io.to(`user:${mId.toString()}`).emit("conversation:deleted", {
+          conversationId,
+        });
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Conversation and all messages deleted successfully",
+      conversationId,
+    });
+  } catch (error) {
+    console.error("Delete conversation error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error deleting conversation",
+    });
+  }
+};
+
+// Clear all messages in conversation without deleting conversation
+const clearConversationMessages = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        message: "Conversation not found",
+      });
+    }
+
+    const isMember = conversation.members.some(
+      (m) => m.toString() === req.user._id.toString()
+    );
+    if (!isMember) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not a member of this conversation",
+      });
+    }
+
+    await Message.deleteMany({ conversation: conversationId });
+    conversation.lastMessage = null;
+    await conversation.save();
+
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`conversation:${conversationId}`).emit("conversation:cleared", {
+        conversationId,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Chat messages cleared successfully",
+      conversationId,
+    });
+  } catch (error) {
+    console.error("Clear chat error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error clearing chat",
+    });
+  }
+};
+
 module.exports = {
   createDirectConversation,
   createGroupConversation,
@@ -533,4 +636,6 @@ module.exports = {
   removeGroupMember,
   toggleAdminRole,
   updateGroupSettings,
+  deleteConversation,
+  clearConversationMessages,
 };
