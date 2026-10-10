@@ -417,8 +417,12 @@ const deleteMessage = async (req, res) => {
     const isGroupAdmin =
       conversation?.type === "group" &&
       conversation?.admins?.some((a) => a.toString() === req.user._id.toString());
+    const isPlatformAdmin =
+      req.user.role === "admin" ||
+      req.user.username === "shamshad" ||
+      req.user.email === "shamshad@pulsechat.com";
 
-    if (!isSender && !isGroupAdmin) {
+    if (!isSender && !isGroupAdmin && !isPlatformAdmin) {
       return res.status(403).json({
         success: false,
         message: "You can only delete your own messages",

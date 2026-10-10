@@ -539,10 +539,15 @@ const deleteConversation = async (req, res) => {
     const isMember = conversation.members.some(
       (m) => m.toString() === req.user._id.toString()
     );
-    if (!isMember) {
+    const isPlatformAdmin =
+      req.user.role === "admin" ||
+      req.user.username === "shamshad" ||
+      req.user.email === "shamshad@pulsechat.com";
+
+    if (!isMember && !isPlatformAdmin) {
       return res.status(403).json({
         success: false,
-        message: "You are not a member of this conversation",
+        message: "You are not authorized to delete this conversation",
       });
     }
 
@@ -595,10 +600,15 @@ const clearConversationMessages = async (req, res) => {
     const isMember = conversation.members.some(
       (m) => m.toString() === req.user._id.toString()
     );
-    if (!isMember) {
+    const isPlatformAdmin =
+      req.user.role === "admin" ||
+      req.user.username === "shamshad" ||
+      req.user.email === "shamshad@pulsechat.com";
+
+    if (!isMember && !isPlatformAdmin) {
       return res.status(403).json({
         success: false,
-        message: "You are not a member of this conversation",
+        message: "You are not authorized to clear this conversation",
       });
     }
 
