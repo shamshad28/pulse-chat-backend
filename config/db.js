@@ -1,28 +1,65 @@
 const mongoose = require("mongoose");
 
-let isConnected = false;
+let connectionPromise = null;
 
 const connectDB = async () => {
-  if (isConnected || mongoose.connection.readyState >= 1) {
-    return;
+  // If already connected, return existing connection
+  if (mongoose.connection.readyState === 1) {
+    return mongoose.connection;
   }
 
-  const mongoUri = process.env.MONGO_URI;
+  // If currently connecting, await the active promise to avoid duplicate connections
+  if (mongoose.connection.readyState === 2 && connectionPromise) {
+    return connectionPromise;
+  }
+
+  // Support both MONGO_URI and MONGODB_URI (standard across Render, Railway, Vercel, Heroku)
+  const mongoUri = process.env.MONGO_URI || process.env.MONGODB_URI;
+
   if (!mongoUri) {
-    console.warn("WARNING: MONGO_URI is not set. Please configure MONGO_URI in your environment variables.");
-    return;
+    const errorMsg =
+      "CRITICAL: Neither MONGO_URI nor MONGODB_URI is set. Please set your MongoDB connection string in your environment variables.";
+    console.error(errorMsg);
+    throw new Error(errorMsg);
   }
 
   try {
-    const connection = await mongoose.connect(mongoUri);
-    isConnected = true;
-    console.log(`MongoDB connected: ${connection.connection.host}`);
+    connectionPromise = mongoose.connect(mongoUri, {
+      dbName: process.env.DB_NAME || "pulsechat",
+      serverSelectionTimeoutMS: 8000,
+    });
+
+    const conn = await connectionPromise;
+    console.log(
+      `✅ MongoDB connected successfully to host: ${conn.connection.host} (DB: ${conn.connection.name})`
+    );
+    return conn;
   } catch (err) {
-    console.error("MongoDB connection error:", err.message);
-    if (!process.env.VERCEL) {
-      throw err;
+    connectionPromise = null;
+    console.error("❌ MongoDB connection error:", err.message);
+
+    if (
+      err.name === "MongooseServerSelectionError" ||
+      err.message?.includes("timed out") ||
+      err.message?.includes("whitelist")
+    ) {
+      console.error(
+        "💡 DEPLOYMENT TIP: If deploying on a cloud host (Render, Railway, Vercel, AWS), ensure you added '0.0.0.0/0' (Allow access from anywhere) in MongoDB Atlas -> Security -> Network Access."
+      );
     }
+
+    throw err;
   }
 };
+
+// Auto-reset promise when disconnected so next request can trigger reconnect
+mongoose.connection.on("disconnected", () => {
+  console.warn("⚠️ MongoDB disconnected. Automatic reconnect will be attempted on next request.");
+  connectionPromise = null;
+});
+
+mongoose.connection.on("error", (err) => {
+  console.error("⚠️ MongoDB runtime connection error:", err.message);
+});
 
 module.exports = connectDB;
