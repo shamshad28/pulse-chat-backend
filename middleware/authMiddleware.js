@@ -1,4 +1,4 @@
-const jwt = require("jsonwebtoken");
+const { verifyToken } = require("../utils/jwt");
 const User = require("../models/User");
 
 const protect = async (req, res, next) => {
@@ -16,10 +16,14 @@ const protect = async (req, res, next) => {
       });
     }
 
-    const decoded = jwt.verify(
-      token,
-      process.env.JWT_SECRET || "default_jwt_secret"
-    );
+    const decoded = verifyToken(token);
+
+    if (!decoded || !decoded.userId) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid token payload",
+      });
+    }
 
     const user = await User.findById(decoded.userId).select("-password");
 
@@ -33,10 +37,9 @@ const protect = async (req, res, next) => {
     req.user = user;
     next();
   } catch (error) {
-    console.error("Auth error:", error.message);
     return res.status(401).json({
       success: false,
-      message: "Invalid or expired token",
+      message: "Invalid or expired session. Please log in again.",
     });
   }
 };

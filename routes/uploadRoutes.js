@@ -1,28 +1,22 @@
 const express = require("express");
-const multer = require("multer");
 const protect = require("../middleware/authMiddleware");
+const { upload } = require("../middleware/uploadMiddleware");
+const { uploadLimiter } = require("../middleware/securityMiddleware");
 const { uploadFile } = require("../services/uploadService");
 
 const router = express.Router();
 
-const storage = multer.memoryStorage();
-const upload = multer({
-  storage,
-  limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB limit
-  },
-});
-
 router.post(
   "/",
   protect,
+  uploadLimiter,
   (req, res, next) => {
-    upload.array("files", 10)(req, res, (err) => {
+    upload.array("files", 5)(req, res, (err) => {
       if (err) {
-        console.error("Multer upload error:", err);
+        console.warn("Upload validation error:", err.message);
         return res.status(400).json({
           success: false,
-          message: err.message || "File upload error",
+          message: err.message || "File upload validation error",
         });
       }
       next();

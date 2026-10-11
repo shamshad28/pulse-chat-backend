@@ -2,6 +2,7 @@ const express = require("express");
 const {
   searchUsers,
   getUsers,
+  getMe,
   updateProfile,
   getUserById,
 } = require("../controllers/userController");
@@ -11,6 +12,7 @@ const router = express.Router();
 
 router.use(protect);
 
+router.get("/me", getMe);
 router.get("/search", searchUsers);
 router.get("/", getUsers);
 router.put("/profile", updateProfile);

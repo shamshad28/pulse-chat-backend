@@ -1,21 +1,19 @@
 const express = require("express");
-
 const {
   register,
   login,
   logout,
 } = require("../controllers/authController");
-
 const protect = require("../middleware/authMiddleware");
-const User = require("../models/User");
+const { authLimiter } = require("../middleware/securityMiddleware");
 
 const router = express.Router();
 
-// Register
-router.post("/register", register);
+// Register with rate limiter
+router.post("/register", authLimiter, register);
 
-// Login
-router.post("/login", login);
+// Login with rate limiter
+router.post("/login", authLimiter, login);
 
 // Logout
 router.post("/logout", logout);

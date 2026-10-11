@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Conversation = require("../models/Conversation");
 const User = require("../models/User");
 const Message = require("../models/Message");
@@ -7,10 +8,10 @@ const createDirectConversation = async (req, res) => {
   try {
     const { userId } = req.body;
 
-    if (!userId) {
+    if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
       return res.status(400).json({
         success: false,
-        message: "userId is required",
+        message: "Valid userId is required",
       });
     }
 
@@ -37,7 +38,7 @@ const createDirectConversation = async (req, res) => {
         $size: 2,
       },
     })
-      .populate("members", "name username email avatar status lastSeen")
+      .populate("members", "name username avatar status lastSeen")
       .populate("lastMessage");
 
     if (existingConversation) {
@@ -56,7 +57,7 @@ const createDirectConversation = async (req, res) => {
     });
 
     const populatedConversation = await Conversation.findById(conversation._id)
-      .populate("members", "name username email avatar status lastSeen")
+      .populate("members", "name username avatar status lastSeen")
       .populate("createdBy", "name username avatar");
 
     const io = req.app.get("io");
@@ -83,14 +84,20 @@ const createGroupConversation = async (req, res) => {
   try {
     const { name, members = [], avatar = "" } = req.body;
 
-    if (!name || !name.trim()) {
+    if (!name || typeof name !== "string" || !name.trim()) {
       return res.status(400).json({
         success: false,
         message: "Group name is required",
       });
     }
 
-    const memberSet = new Set(members.map((id) => id.toString()));
+    const trimmedName = name.trim().slice(0, 50);
+
+    const validMembers = Array.isArray(members)
+      ? members.filter((id) => mongoose.Types.ObjectId.isValid(id))
+      : [];
+
+    const memberSet = new Set(validMembers.map((id) => id.toString()));
     memberSet.add(req.user._id.toString());
 
     if (memberSet.size < 2) {
@@ -102,16 +109,16 @@ const createGroupConversation = async (req, res) => {
 
     const group = await Conversation.create({
       type: "group",
-      name: name.trim(),
-      avatar: avatar.trim(),
+      name: trimmedName,
+      avatar: typeof avatar === "string" ? avatar.trim().slice(0, 2000) : "",
       members: Array.from(memberSet),
       admins: [req.user._id],
       createdBy: req.user._id,
     });
 
     const populatedGroup = await Conversation.findById(group._id)
-      .populate("members", "name username email avatar status lastSeen")
-      .populate("admins", "name username email avatar")
+      .populate("members", "name username avatar status lastSeen")
+      .populate("admins", "name username avatar")
       .populate("createdBy", "name username avatar");
 
     const io = req.app.get("io");
@@ -141,8 +148,8 @@ const getMyConversations = async (req, res) => {
     const conversations = await Conversation.find({
       members: req.user._id,
     })
-      .populate("members", "name username email avatar status lastSeen")
-      .populate("admins", "name username email avatar")
+      .populate("members", "name username avatar status lastSeen")
+      .populate("admins", "name username avatar")
       .populate("createdBy", "name username avatar")
       .populate({
         path: "lastMessage",
@@ -197,14 +204,21 @@ const getMyConversations = async (req, res) => {
   }
 };
 
-// Get one conversation
+// Get one conversation (Authorization: member only)
 const getConversationById = async (req, res) => {
   try {
     const { conversationId } = req.params;
 
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid conversation ID format",
+      });
+    }
+
     const conversation = await Conversation.findById(conversationId)
-      .populate("members", "name username email avatar status lastSeen")
-      .populate("admins", "name username email avatar")
+      .populate("members", "name username avatar status lastSeen")
+      .populate("admins", "name username avatar")
       .populate("createdBy", "name username avatar")
       .populate({
         path: "lastMessage",
@@ -251,6 +265,13 @@ const addGroupMembers = async (req, res) => {
     const { conversationId } = req.params;
     const { members = [] } = req.body;
 
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid conversation ID",
+      });
+    }
+
     const conversation = await Conversation.findById(conversationId);
     if (!conversation || conversation.type !== "group") {
       return res.status(404).json({
@@ -270,15 +291,21 @@ const addGroupMembers = async (req, res) => {
       });
     }
 
+    const validNewMembers = Array.isArray(members)
+      ? members.filter((id) => mongoose.Types.ObjectId.isValid(id))
+      : [];
+
     const currentMemberIds = new Set(
       conversation.members.map((m) => m.toString())
     );
-    const newMembers = members.filter((id) => !currentMemberIds.has(id.toString()));
+    const newMembers = validNewMembers.filter(
+      (id) => !currentMemberIds.has(id.toString())
+    );
 
     if (newMembers.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "Selected users are already members of this group",
+        message: "Selected users are already members of this group or invalid",
       });
     }
 
@@ -286,8 +313,8 @@ const addGroupMembers = async (req, res) => {
     await conversation.save();
 
     const updatedGroup = await Conversation.findById(conversationId)
-      .populate("members", "name username email avatar status lastSeen")
-      .populate("admins", "name username email avatar")
+      .populate("members", "name username avatar status lastSeen")
+      .populate("admins", "name username avatar")
       .populate("createdBy", "name username avatar")
       .populate({
         path: "lastMessage",
@@ -320,6 +347,16 @@ const addGroupMembers = async (req, res) => {
 const removeGroupMember = async (req, res) => {
   try {
     const { conversationId, userId } = req.params;
+
+    if (
+      !mongoose.Types.ObjectId.isValid(conversationId) ||
+      !mongoose.Types.ObjectId.isValid(userId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid ID format",
+      });
+    }
 
     const conversation = await Conversation.findById(conversationId);
     if (!conversation || conversation.type !== "group") {
@@ -357,8 +394,8 @@ const removeGroupMember = async (req, res) => {
     await conversation.save();
 
     const updatedGroup = await Conversation.findById(conversationId)
-      .populate("members", "name username email avatar status lastSeen")
-      .populate("admins", "name username email avatar")
+      .populate("members", "name username avatar status lastSeen")
+      .populate("admins", "name username avatar")
       .populate("createdBy", "name username avatar")
       .populate({
         path: "lastMessage",
@@ -389,7 +426,17 @@ const removeGroupMember = async (req, res) => {
 const toggleAdminRole = async (req, res) => {
   try {
     const { conversationId } = req.params;
-    const { userId, role } = req.body; // role: 'admin' or 'member'
+    const { userId, role } = req.body;
+
+    if (
+      !mongoose.Types.ObjectId.isValid(conversationId) ||
+      !mongoose.Types.ObjectId.isValid(userId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid ID format",
+      });
+    }
 
     const conversation = await Conversation.findById(conversationId);
     if (!conversation || conversation.type !== "group") {
@@ -443,8 +490,8 @@ const toggleAdminRole = async (req, res) => {
     await conversation.save();
 
     const updatedGroup = await Conversation.findById(conversationId)
-      .populate("members", "name username email avatar status lastSeen")
-      .populate("admins", "name username email avatar")
+      .populate("members", "name username avatar status lastSeen")
+      .populate("admins", "name username avatar")
       .populate("createdBy", "name username avatar");
 
     const io = req.app.get("io");
@@ -466,11 +513,18 @@ const toggleAdminRole = async (req, res) => {
   }
 };
 
-// Update group settings (name, avatar)
+// Update group settings (Admin only)
 const updateGroupSettings = async (req, res) => {
   try {
     const { conversationId } = req.params;
     const { name, avatar } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid conversation ID",
+      });
+    }
 
     const conversation = await Conversation.findById(conversationId);
     if (!conversation || conversation.type !== "group") {
@@ -492,17 +546,17 @@ const updateGroupSettings = async (req, res) => {
     }
 
     if (typeof name === "string" && name.trim()) {
-      conversation.name = name.trim();
+      conversation.name = name.trim().slice(0, 50);
     }
     if (typeof avatar === "string") {
-      conversation.avatar = avatar.trim();
+      conversation.avatar = avatar.trim().slice(0, 2000);
     }
 
     await conversation.save();
 
     const updatedGroup = await Conversation.findById(conversationId)
-      .populate("members", "name username email avatar status lastSeen")
-      .populate("admins", "name username email avatar")
+      .populate("members", "name username avatar status lastSeen")
+      .populate("admins", "name username avatar")
       .populate("createdBy", "name username avatar");
 
     const io = req.app.get("io");
@@ -524,10 +578,18 @@ const updateGroupSettings = async (req, res) => {
   }
 };
 
-// Delete entire conversation and all its messages
+// Delete conversation (Enforces admin authorization for groups)
 const deleteConversation = async (req, res) => {
   try {
     const { conversationId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid conversation ID",
+      });
+    }
+
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
       return res.status(404).json({
@@ -539,16 +601,26 @@ const deleteConversation = async (req, res) => {
     const isMember = conversation.members.some(
       (m) => m.toString() === req.user._id.toString()
     );
-    const isPlatformAdmin =
-      req.user.role === "admin" ||
-      req.user.username === "shamshad" ||
-      req.user.email === "shamshad@pulsechat.com";
+    const isPlatformAdmin = req.user.role === "admin";
 
     if (!isMember && !isPlatformAdmin) {
       return res.status(403).json({
         success: false,
-        message: "You are not authorized to delete this conversation",
+        message: "You are not a member of this conversation",
       });
+    }
+
+    // For groups: only group admins or platform admin can delete the entire group
+    if (conversation.type === "group") {
+      const isGroupAdmin = conversation.admins.some(
+        (a) => a.toString() === req.user._id.toString()
+      );
+      if (!isGroupAdmin && !isPlatformAdmin) {
+        return res.status(403).json({
+          success: false,
+          message: "Only group admins can delete a group conversation",
+        });
+      }
     }
 
     const memberIds = [...conversation.members];
@@ -585,10 +657,18 @@ const deleteConversation = async (req, res) => {
   }
 };
 
-// Clear all messages in conversation without deleting conversation
+// Clear all messages in conversation
 const clearConversationMessages = async (req, res) => {
   try {
     const { conversationId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid conversation ID",
+      });
+    }
+
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
       return res.status(404).json({
@@ -600,16 +680,26 @@ const clearConversationMessages = async (req, res) => {
     const isMember = conversation.members.some(
       (m) => m.toString() === req.user._id.toString()
     );
-    const isPlatformAdmin =
-      req.user.role === "admin" ||
-      req.user.username === "shamshad" ||
-      req.user.email === "shamshad@pulsechat.com";
+    const isPlatformAdmin = req.user.role === "admin";
 
     if (!isMember && !isPlatformAdmin) {
       return res.status(403).json({
         success: false,
         message: "You are not authorized to clear this conversation",
       });
+    }
+
+    // In groups, only admins can clear conversation for all
+    if (conversation.type === "group") {
+      const isGroupAdmin = conversation.admins.some(
+        (a) => a.toString() === req.user._id.toString()
+      );
+      if (!isGroupAdmin && !isPlatformAdmin) {
+        return res.status(403).json({
+          success: false,
+          message: "Only group admins can clear group messages",
+        });
+      }
     }
 
     await Message.deleteMany({ conversation: conversationId });

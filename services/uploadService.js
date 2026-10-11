@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const cloudinary = require("cloudinary").v2;
 
 const isCloudinaryConfigured = () => {
@@ -30,7 +31,7 @@ try {
   console.warn("Notice: Local uploads folder creation:", err.message);
 }
 
-const getFileType = (mimeType) => {
+const getFileType = (mimeType = "") => {
   if (mimeType.startsWith("image/")) return "image";
   if (mimeType.startsWith("video/")) return "video";
   if (mimeType.startsWith("audio/")) return "audio";
@@ -38,17 +39,28 @@ const getFileType = (mimeType) => {
 };
 
 const uploadFile = async (file, req) => {
-  const fileType = getFileType(file.mimetype);
+  const mimeType = (file.mimetype || "").toLowerCase();
+  const fileType = getFileType(mimeType);
+
+  // Sanitize original filename to prevent path traversal
+  const rawOriginal = path.basename(file.originalname || "attachment");
+  const ext = path.extname(rawOriginal).toLowerCase();
+  const rawBase = path.basename(rawOriginal, ext);
+  const sanitizedBase = rawBase.replace(/[^a-zA-Z0-9_\-\.]/g, "_").slice(0, 80);
+  const sanitizedOriginalName = `${sanitizedBase}${ext}`;
 
   if (isCloudinaryConfigured()) {
     try {
-      const resourceType = fileType === "image" ? "image" : fileType === "video" ? "video" : "raw";
-      
+      const resourceType =
+        fileType === "image" ? "image" : fileType === "video" ? "video" : "raw";
+
       const uploadResult = await new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream(
           {
             resource_type: resourceType,
             folder: "chat_media",
+            // Cloudinary public ID sanitization
+            public_id: `${Date.now()}-${crypto.randomBytes(8).toString("hex")}-${sanitizedBase}`,
           },
           (error, result) => {
             if (error) reject(error);
@@ -61,7 +73,7 @@ const uploadFile = async (file, req) => {
       return {
         url: uploadResult.secure_url,
         publicId: uploadResult.public_id,
-        fileName: file.originalname,
+        fileName: sanitizedOriginalName,
         mimeType: file.mimetype,
         size: file.size,
         type: fileType,
@@ -71,18 +83,28 @@ const uploadFile = async (file, req) => {
     }
   }
 
-  // Local storage fallback
-  const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}-${file.originalname.replace(/\s+/g, "_")}`;
+  // Local storage fallback with cryptographically secure random name and path containment
+  const uniqueName = `${Date.now()}-${crypto.randomBytes(12).toString("hex")}${ext}`;
   const filePath = path.join(uploadsDir, uniqueName);
+
+  // Path containment verification
+  const resolvedPath = path.resolve(filePath);
+  const resolvedUploadsDir = path.resolve(uploadsDir);
+  if (!resolvedPath.startsWith(resolvedUploadsDir)) {
+    throw new Error("Invalid file destination path");
+  }
+
   fs.writeFileSync(filePath, file.buffer);
 
-  const backendBase = process.env.BACKEND_URL || `${req.protocol || "http"}://${req.get("host") || "localhost:5000"}`;
+  const backendBase =
+    process.env.BACKEND_URL ||
+    `${req.protocol || "http"}://${req.get("host") || "localhost:5000"}`;
   const fileUrl = `${backendBase}/uploads/${uniqueName}`;
 
   return {
     url: fileUrl,
     publicId: uniqueName,
-    fileName: file.originalname,
+    fileName: sanitizedOriginalName,
     mimeType: file.mimetype,
     size: file.size,
     type: fileType,

@@ -1,5 +1,24 @@
+const mongoose = require("mongoose");
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
+
+// Helper to escape regex special characters to prevent ReDoS
+const escapeRegExp = (string) => {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+};
+
+// Helper to validate safe media URL
+const isSafeMediaUrl = (url) => {
+  if (!url || typeof url !== "string") return false;
+  const trimmed = url.trim();
+  if (trimmed.startsWith("/uploads/")) return true;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
 
 // Send a message
 const sendMessage = async (req, res) => {
@@ -15,10 +34,10 @@ const sendMessage = async (req, res) => {
 
     const conversationId = rawConvId || altConvId;
 
-    if (!conversationId) {
+    if (!conversationId || !mongoose.Types.ObjectId.isValid(conversationId)) {
       return res.status(400).json({
         success: false,
-        message: "conversationId is required",
+        message: "Valid conversationId is required",
       });
     }
 
@@ -41,18 +60,35 @@ const sendMessage = async (req, res) => {
       });
     }
 
-    const trimmedContent = typeof content === "string" ? content.trim() : "";
+    const trimmedContent = typeof content === "string" ? content.trim().slice(0, 10000) : "";
 
-    if (!trimmedContent && (!attachments || attachments.length === 0)) {
+    // Validate attachments
+    const safeAttachments = [];
+    if (Array.isArray(attachments)) {
+      for (const att of attachments.slice(0, 10)) {
+        if (att && typeof att === "object" && isSafeMediaUrl(att.url)) {
+          safeAttachments.push({
+            url: att.url.trim(),
+            publicId: typeof att.publicId === "string" ? att.publicId.slice(0, 200) : "",
+            fileName: typeof att.fileName === "string" ? att.fileName.slice(0, 150) : "attachment",
+            mimeType: typeof att.mimeType === "string" ? att.mimeType.slice(0, 100) : "application/octet-stream",
+            size: Number(att.size) || 0,
+            type: typeof att.type === "string" ? att.type.slice(0, 20) : "document",
+          });
+        }
+      }
+    }
+
+    if (!trimmedContent && safeAttachments.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "Message content or attachment is required",
+        message: "Message content or valid attachment is required",
       });
     }
 
     // Verify replyTo if provided
     let validReplyTo = null;
-    if (replyTo) {
+    if (replyTo && mongoose.Types.ObjectId.isValid(replyTo)) {
       const parentMessage = await Message.findById(replyTo);
       if (parentMessage && parentMessage.conversation.toString() === conversationId) {
         validReplyTo = parentMessage._id;
@@ -78,8 +114,8 @@ const sendMessage = async (req, res) => {
       conversation: conversationId,
       sender: req.user._id,
       content: trimmedContent,
-      type,
-      attachments,
+      type: typeof type === "string" ? type.slice(0, 20) : "text",
+      attachments: safeAttachments,
       replyTo: validReplyTo,
       readBy,
       deliveredTo,
@@ -132,13 +168,21 @@ const sendMessage = async (req, res) => {
   }
 };
 
-// Get messages for a conversation with pagination / infinite scroll
+// Get messages for a conversation
 const getMessages = async (req, res) => {
   try {
     const { conversationId } = req.params;
-    const page = Number(req.query.page) || 1;
-    const limit = Math.min(Number(req.query.limit) || 30, 100);
-    const before = req.query.before; // Optional ISO timestamp or ObjectId for cursor pagination
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid conversation ID",
+      });
+    }
+
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(Math.max(1, Number(req.query.limit) || 30), 100);
+    const before = req.query.before;
 
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
@@ -160,7 +204,7 @@ const getMessages = async (req, res) => {
     }
 
     const query = { conversation: conversationId };
-    if (before) {
+    if (before && !isNaN(new Date(before).getTime())) {
       query.createdAt = { $lt: new Date(before) };
     }
 
@@ -193,7 +237,6 @@ const getMessages = async (req, res) => {
       }
     );
 
-    // Sort ascending for chat UI display
     const chronologicalMessages = messages.reverse();
 
     res.status(200).json({
@@ -219,12 +262,21 @@ const toggleReaction = async (req, res) => {
     const { messageId } = req.params;
     const { emoji } = req.body;
 
-    if (!emoji || typeof emoji !== "string") {
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
       return res.status(400).json({
         success: false,
-        message: "Valid emoji string is required",
+        message: "Invalid message ID",
       });
     }
+
+    if (!emoji || typeof emoji !== "string" || emoji.trim().length > 16) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid emoji string is required (max 16 characters)",
+      });
+    }
+
+    const cleanEmoji = emoji.trim();
 
     const message = await Message.findById(messageId);
     if (!message) {
@@ -246,21 +298,18 @@ const toggleReaction = async (req, res) => {
       });
     }
 
-    // Check existing reaction by this user with this emoji
     const existingIndex = message.reactions.findIndex(
       (r) =>
         r.user.toString() === req.user._id.toString() &&
-        r.emoji === emoji.trim()
+        r.emoji === cleanEmoji
     );
 
     if (existingIndex > -1) {
-      // Remove reaction
       message.reactions.splice(existingIndex, 1);
     } else {
-      // Add reaction
       message.reactions.push({
         user: req.user._id,
-        emoji: emoji.trim(),
+        emoji: cleanEmoji,
       });
     }
 
@@ -296,6 +345,13 @@ const toggleReaction = async (req, res) => {
 const markConversationAsRead = async (req, res) => {
   try {
     const { conversationId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid conversation ID",
+      });
+    }
 
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
@@ -354,28 +410,35 @@ const markConversationAsRead = async (req, res) => {
 const searchMessages = async (req, res) => {
   try {
     const { q, conversationId } = req.query;
-    const queryStr = typeof q === "string" ? q.trim() : "";
+    const rawQuery = typeof q === "string" ? q.trim() : "";
 
-    if (!queryStr) {
+    if (!rawQuery) {
       return res.status(400).json({
         success: false,
         message: "Search query 'q' is required",
       });
     }
 
+    // Sanitize and limit query length to prevent ReDoS
+    const sanitizedQuery = escapeRegExp(rawQuery.slice(0, 50));
+
     // Find all conversations the user is a member of
     const userConversations = await Conversation.find({
       members: req.user._id,
-    }).select("_id name type");
+    }).select("_id");
 
     const userConvIds = userConversations.map((c) => c._id);
 
     const filter = {
       conversation: { $in: userConvIds },
-      content: { $regex: queryStr, $options: "i" },
+      content: { $regex: sanitizedQuery, $options: "i" },
     };
 
-    if (conversationId && userConvIds.some((id) => id.toString() === conversationId)) {
+    if (
+      conversationId &&
+      mongoose.Types.ObjectId.isValid(conversationId) &&
+      userConvIds.some((id) => id.toString() === conversationId)
+    ) {
       filter.conversation = conversationId;
     }
 
@@ -404,6 +467,14 @@ const searchMessages = async (req, res) => {
 const deleteMessage = async (req, res) => {
   try {
     const { messageId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message ID",
+      });
+    }
+
     const message = await Message.findById(messageId);
     if (!message) {
       return res.status(404).json({
@@ -417,10 +488,7 @@ const deleteMessage = async (req, res) => {
     const isGroupAdmin =
       conversation?.type === "group" &&
       conversation?.admins?.some((a) => a.toString() === req.user._id.toString());
-    const isPlatformAdmin =
-      req.user.role === "admin" ||
-      req.user.username === "shamshad" ||
-      req.user.email === "shamshad@pulsechat.com";
+    const isPlatformAdmin = req.user.role === "admin";
 
     if (!isSender && !isGroupAdmin && !isPlatformAdmin) {
       return res.status(403).json({

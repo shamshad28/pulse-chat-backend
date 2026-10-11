@@ -1,7 +1,6 @@
 const bcrypt = require("bcryptjs");
-
 const User = require("../models/User");
-const generateToken = require("../utils/generateToken");
+const { generateToken } = require("../utils/jwt");
 
 // REGISTER
 const register = async (req, res) => {
@@ -9,11 +8,24 @@ const register = async (req, res) => {
     const rawName = req.body.name;
     const rawUsername = req.body.username;
     const rawEmail = req.body.email;
-    const password = req.body.password;
+    const rawPassword = req.body.password;
 
-    const name = typeof rawName === "string" ? rawName.trim() : "";
-    const username = typeof rawUsername === "string" ? rawUsername.trim().toLowerCase() : "";
-    const email = typeof rawEmail === "string" ? rawEmail.trim().toLowerCase() : "";
+    if (
+      typeof rawName !== "string" ||
+      typeof rawUsername !== "string" ||
+      typeof rawEmail !== "string" ||
+      typeof rawPassword !== "string"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid field format. All fields must be strings.",
+      });
+    }
+
+    const name = rawName.trim();
+    const username = rawUsername.trim().toLowerCase();
+    const email = rawEmail.trim().toLowerCase();
+    const password = rawPassword;
 
     // Validation
     if (!name || !username || !email || !password) {
@@ -23,22 +35,30 @@ const register = async (req, res) => {
       });
     }
 
-    if (name.length < 2) {
+    if (name.length < 2 || name.length > 50) {
       return res.status(400).json({
         success: false,
-        message: "Full name must be at least 2 characters",
+        message: "Full name must be between 2 and 50 characters",
       });
     }
 
-    if (username.length < 3) {
+    if (username.length < 3 || username.length > 30) {
       return res.status(400).json({
         success: false,
-        message: "Username must be at least 3 characters",
+        message: "Username must be between 3 and 30 characters",
+      });
+    }
+
+    const usernameRegex = /^[a-zA-Z0-9._-]+$/;
+    if (!usernameRegex.test(username)) {
+      return res.status(400).json({
+        success: false,
+        message: "Username can only contain letters, numbers, dots, underscores, and hyphens",
       });
     }
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
+    if (!emailRegex.test(email) || email.length > 100) {
       return res.status(400).json({
         success: false,
         message: "Please enter a valid email address",
@@ -52,7 +72,14 @@ const register = async (req, res) => {
       });
     }
 
-    // Check existing email (case-insensitive)
+    if (password.length > 128) {
+      return res.status(400).json({
+        success: false,
+        message: "Password is too long (maximum 128 characters)",
+      });
+    }
+
+    // Check existing email
     const existingEmail = await User.findOne({ email });
     if (existingEmail) {
       return res.status(409).json({
@@ -61,7 +88,7 @@ const register = async (req, res) => {
       });
     }
 
-    // Check existing username (case-insensitive)
+    // Check existing username
     const existingUsername = await User.findOne({ username });
     if (existingUsername) {
       return res.status(409).json({
@@ -129,7 +156,7 @@ const register = async (req, res) => {
 
     res.status(500).json({
       success: false,
-      message: error.message || "Registration failed due to server error",
+      message: "Registration failed due to server error",
     });
   }
 };
@@ -137,12 +164,30 @@ const register = async (req, res) => {
 // LOGIN
 const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const rawEmail = req.body.email;
+    const rawPassword = req.body.password;
+
+    if (typeof rawEmail !== "string" || typeof rawPassword !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Email and password must be valid strings",
+      });
+    }
+
+    const email = rawEmail.trim().toLowerCase();
+    const password = rawPassword;
 
     if (!email || !password) {
       return res.status(400).json({
         success: false,
         message: "Email and password are required",
+      });
+    }
+
+    if (password.length > 128) {
+      return res.status(400).json({
+        success: false,
+        message: "Password exceeds maximum permitted length",
       });
     }
 
@@ -157,10 +202,7 @@ const login = async (req, res) => {
     }
 
     // Compare password
-    const isPasswordCorrect = await bcrypt.compare(
-      password,
-      user.password
-    );
+    const isPasswordCorrect = await bcrypt.compare(password, user.password);
 
     if (!isPasswordCorrect) {
       return res.status(401).json({
@@ -172,7 +214,6 @@ const login = async (req, res) => {
     // Update status
     user.status = "online";
     user.lastSeen = null;
-
     await user.save();
 
     // Generate JWT
@@ -205,7 +246,7 @@ const login = async (req, res) => {
 
     res.status(500).json({
       success: false,
-      message: "Server error",
+      message: "Server error during authentication",
     });
   }
 };

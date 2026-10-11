@@ -3,6 +3,7 @@ require("dotenv").config({ path: __dirname + "/.env" });
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
+const helmet = require("helmet");
 const cookieParser = require("cookie-parser");
 const { Server } = require("socket.io");
 const path = require("path");
@@ -16,11 +17,41 @@ const conversationRoutes = require("./routes/conversationRoutes");
 const messageRoutes = require("./routes/messageRoutes");
 const uploadRoutes = require("./routes/uploadRoutes");
 const registerChatSocket = require("./sockets/chatSocket");
+const {
+  probeBlocker,
+  mongoSanitize,
+  xssSanitizer,
+  globalLimiter,
+} = require("./middleware/securityMiddleware");
 
 const app = express();
 const server = http.createServer(app);
 
-// Normalize allowed origins by stripping trailing slashes
+// 1. Scanner & Exploit Probe Blocker (Top of middleware stack)
+app.use(probeBlocker);
+
+// 2. HTTP Security Headers with Helmet
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "blob:", "https:", "http:"],
+        mediaSrc: ["'self'", "data:", "blob:", "https:", "http:"],
+        connectSrc: ["'self'", "ws:", "wss:", "https:", "http:"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        frameAncestors: ["'self'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
+
+// 3. Strict CORS Configuration
 const allowedOrigins = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
@@ -43,8 +74,8 @@ const corsOptions = {
     ) {
       return callback(null, true);
     }
-    // Allow any origin with credentials for cross-origin client apps
-    return callback(null, true);
+    // Disallow unauthorized origins with credentials
+    return callback(new Error("CORS policy violation: origin not allowed"), false);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
@@ -61,11 +92,19 @@ const io = new Server(server, {
 app.set("io", io);
 
 app.use(cors(corsOptions));
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+// Safe 2MB body limit (file uploads use multipart memory stream)
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 app.use(cookieParser());
 
-// Static uploads directory (supports serverless /tmp if needed)
+// 4. Input Sanitization (NoSQL injection and XSS tags)
+app.use(mongoSanitize);
+app.use(xssSanitizer);
+
+// 5. Rate Limiting for API routes
+app.use("/api", globalLimiter);
+
+// 6. Secure Static Uploads Directory
 const uploadsDir = process.env.VERCEL ? "/tmp/uploads" : path.join(__dirname, "uploads");
 try {
   if (!fs.existsSync(uploadsDir)) {
@@ -74,9 +113,45 @@ try {
 } catch (e) {
   console.warn("Notice: Uploads directory setup:", e.message);
 }
-app.use("/uploads", express.static(uploadsDir));
 
-// Diagnostic Health Check endpoint
+app.use(
+  "/uploads",
+  (req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    next();
+  },
+  express.static(uploadsDir, {
+    dotfiles: "deny",
+    index: false,
+    setHeaders: (res, filePath) => {
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      const ext = path.extname(filePath).toLowerCase();
+      const inlineExts = [
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".gif",
+        ".mp4",
+        ".webm",
+        ".mp3",
+        ".wav",
+        ".ogg",
+      ];
+      if (!inlineExts.includes(ext)) {
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="${path.basename(filePath)}"`
+        );
+      }
+    },
+  })
+);
+
+// 7. Sanitized Diagnostic Health Check endpoint (no host/DB name disclosure)
 app.get(["/api/health", "/health"], (req, res) => {
   const readyState = mongoose.connection.readyState;
   const states = {
@@ -94,8 +169,6 @@ app.get(["/api/health", "/health"], (req, res) => {
     database: {
       status: states[readyState] || "unknown",
       readyState,
-      host: mongoose.connection.host || null,
-      name: mongoose.connection.name || null,
       configured: Boolean(process.env.MONGO_URI || process.env.MONGODB_URI),
     },
     auth: {
@@ -118,8 +191,7 @@ app.use(async (req, res, next) => {
     console.error(`Database error on ${req.method} ${req.path}:`, err.message);
     return res.status(503).json({
       success: false,
-      message: "Database connection unavailable. Please check MONGO_URI and MongoDB Atlas network access (0.0.0.0/0).",
-      error: err.message,
+      message: "Database connection unavailable. Please check database configuration.",
     });
   }
 });
@@ -131,43 +203,53 @@ app.use(["/api/conversations", "/conversations"], conversationRoutes);
 app.use(["/api/messages", "/messages"], messageRoutes);
 app.use(["/api/upload", "/upload"], uploadRoutes);
 
+// Socket Handler
 registerChatSocket(io);
+
+// Centralized Error Handler (prevents stack trace leakage)
+app.use((err, req, res, next) => {
+  if (err.message && err.message.includes("CORS policy violation")) {
+    return res.status(403).json({
+      success: false,
+      message: "Origin not permitted by CORS policy",
+    });
+  }
+
+  console.error("Server error:", err.message);
+  res.status(err.status || 500).json({
+    success: false,
+    message: process.env.NODE_ENV === "production" ? "Internal server error" : err.message,
+  });
+});
 
 const PORT = Number(process.env.PORT) || 5000;
 
 const startServer = async () => {
-  // Bind to 0.0.0.0 so cloud providers (Render, Railway, Fly.io, Heroku) can route traffic
   server.listen(PORT, "0.0.0.0", () => {
     console.log(`🚀 PulseChat server is running on http://0.0.0.0:${PORT}`);
   });
 
   server.on("error", (error) => {
     if (error.code === "EADDRINUSE") {
-      console.error(
-        `Port ${PORT} is already in use. Please stop the other process on port ${PORT}.`
-      );
+      console.error(`Port ${PORT} is already in use.`);
     } else {
       console.error("Server error:", error.message);
     }
   });
 
-  // Attempt initial DB connection without crashing the server if delayed
   try {
     await connectDB();
   } catch (err) {
-    console.error(
-      "⚠️ Initial MongoDB connection failed. Server will keep running and retry on incoming requests:",
-      err.message
-    );
+    console.error("⚠️ Initial MongoDB connection failed:", err.message);
   }
 };
 
 if (process.env.VERCEL) {
-  // In Vercel serverless, initiate background connection on cold start
-  connectDB().catch((err) => console.error("Vercel cold start DB connection warning:", err.message));
+  connectDB().catch((err) =>
+    console.error("Vercel cold start DB connection warning:", err.message)
+  );
 } else {
   startServer();
 }
 
 module.exports = app;
-

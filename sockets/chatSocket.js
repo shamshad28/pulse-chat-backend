@@ -1,61 +1,136 @@
+const mongoose = require("mongoose");
 const User = require("../models/User");
+const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
+const { verifyToken } = require("../utils/jwt");
 
 // Map: userId -> Set of socket IDs
 const onlineUsers = new Map();
 // Map: socketId -> userId
 const socketUserMap = new Map();
 
+// Helper to parse cookies from cookie header
+const parseCookies = (cookieHeader) => {
+  if (!cookieHeader || typeof cookieHeader !== "string") return {};
+  return cookieHeader.split(";").reduce((acc, str) => {
+    const parts = str.trim().split("=");
+    if (parts.length >= 2) {
+      const key = parts[0].trim();
+      const val = parts.slice(1).join("=").trim();
+      acc[key] = decodeURIComponent(val);
+    }
+    return acc;
+  }, {});
+};
+
 const registerChatSocket = (io) => {
   // Attach onlineUsers to io instance so controllers can access it
   io.onlineUsers = onlineUsers;
 
-  io.on("connection", (socket) => {
-    // 1. User Setup & Authentication on Socket Connect
-    socket.on("setup", async (userData) => {
-      if (!userData || (!userData._id && !userData.id)) return;
-      const userId = (userData._id || userData.id).toString();
+  // 1. Socket.IO Authentication Middleware
+  io.use(async (socket, next) => {
+    try {
+      let token = socket.handshake.auth?.token;
 
-      socketUserMap.set(socket.id, userId);
-
-      if (!onlineUsers.has(userId)) {
-        onlineUsers.set(userId, new Set());
+      if (!token && socket.handshake.headers?.authorization?.startsWith("Bearer ")) {
+        token = socket.handshake.headers.authorization.split(" ")[1];
       }
-      onlineUsers.get(userId).add(socket.id);
 
-      // Join a private room for this user to receive direct notifications
-      socket.join(`user:${userId}`);
-
-      try {
-        // Update user status in DB
-        await User.findByIdAndUpdate(userId, {
-          status: "online",
-          lastSeen: null,
-        });
-
-        // Broadcast to all clients that this user is online
-        io.emit("presence:update", {
-          userId,
-          status: "online",
-          lastSeen: null,
-        });
-
-        // Send back list of all currently online users
-        socket.emit("onlineUsers:list", Array.from(onlineUsers.keys()));
-      } catch (err) {
-        console.error("Error setting user online:", err.message);
+      if (!token && socket.handshake.headers?.cookie) {
+        const cookies = parseCookies(socket.handshake.headers.cookie);
+        token = cookies.token;
       }
+
+      if (!token) {
+        return next(new Error("Authentication error: Token required"));
+      }
+
+      const decoded = verifyToken(token);
+      if (!decoded || !decoded.userId || !mongoose.Types.ObjectId.isValid(decoded.userId)) {
+        return next(new Error("Authentication error: Invalid token"));
+      }
+
+      const user = await User.findById(decoded.userId).select("_id name username avatar status");
+      if (!user) {
+        return next(new Error("Authentication error: User not found"));
+      }
+
+      socket.user = user;
+      next();
+    } catch (err) {
+      console.warn("Socket connection rejected:", err.message);
+      return next(new Error("Authentication error: Unauthorized"));
+    }
+  });
+
+  io.on("connection", async (socket) => {
+    const userId = socket.user._id.toString();
+
+    // Bind socket to authenticated user
+    socketUserMap.set(socket.id, userId);
+
+    if (!onlineUsers.has(userId)) {
+      onlineUsers.set(userId, new Set());
+    }
+    onlineUsers.get(userId).add(socket.id);
+
+    // Securely join private room for this verified user
+    socket.join(`user:${userId}`);
+
+    try {
+      // Update user status in DB
+      await User.findByIdAndUpdate(userId, {
+        status: "online",
+        lastSeen: null,
+      });
+
+      // Broadcast to all clients that this user is online
+      io.emit("presence:update", {
+        userId,
+        status: "online",
+        lastSeen: null,
+      });
+
+      // Send back list of all currently online users
+      socket.emit("onlineUsers:list", Array.from(onlineUsers.keys()));
+    } catch (err) {
+      console.error("Error setting user online:", err.message);
+    }
+
+    // 2. Client setup event (acknowledgement)
+    socket.on("setup", () => {
+      socket.emit("onlineUsers:list", Array.from(onlineUsers.keys()));
     });
 
-    // 2. Request current online users list
+    // 3. Request current online users list
     socket.on("getOnlineUsers", () => {
       socket.emit("onlineUsers:list", Array.from(onlineUsers.keys()));
     });
 
-    // 3. Conversation Rooms
-    socket.on("joinConversation", (conversationId) => {
-      if (!conversationId) return;
-      socket.join(`conversation:${conversationId}`);
+    // 4. Conversation Rooms (Authorization Enforced!)
+    socket.on("joinConversation", async (conversationId) => {
+      if (!conversationId || !mongoose.Types.ObjectId.isValid(conversationId)) return;
+
+      try {
+        const conversation = await Conversation.findById(conversationId).select("members");
+        if (!conversation) return;
+
+        const isMember = conversation.members.some(
+          (m) => m.toString() === userId
+        );
+
+        if (!isMember) {
+          socket.emit("conversation:unauthorized", {
+            conversationId,
+            message: "You are not a member of this conversation",
+          });
+          return;
+        }
+
+        socket.join(`conversation:${conversationId}`);
+      } catch (err) {
+        console.error("Error in joinConversation:", err.message);
+      }
     });
 
     socket.on("leaveConversation", (conversationId) => {
@@ -63,16 +138,28 @@ const registerChatSocket = (io) => {
       socket.leave(`conversation:${conversationId}`);
     });
 
-    // 4. Typing Indicators
-    socket.on("typing:start", ({ conversationId, user }) => {
-      if (!conversationId) return;
-      socket.to(`conversation:${conversationId}`).emit("typing:started", {
-        conversationId,
-        user,
-      });
+    // 5. Typing Indicators (Restricted to members)
+    socket.on("typing:start", async ({ conversationId }) => {
+      if (!conversationId || !mongoose.Types.ObjectId.isValid(conversationId)) return;
+
+      try {
+        const conversation = await Conversation.findById(conversationId).select("members");
+        if (!conversation?.members.some((m) => m.toString() === userId)) return;
+
+        socket.to(`conversation:${conversationId}`).emit("typing:started", {
+          conversationId,
+          user: {
+            _id: socket.user._id,
+            name: socket.user.name,
+            username: socket.user.username,
+          },
+        });
+      } catch (err) {
+        console.error("Error in typing:start:", err.message);
+      }
     });
 
-    socket.on("typing:stop", ({ conversationId, userId }) => {
+    socket.on("typing:stop", ({ conversationId }) => {
       if (!conversationId) return;
       socket.to(`conversation:${conversationId}`).emit("typing:stopped", {
         conversationId,
@@ -80,20 +167,23 @@ const registerChatSocket = (io) => {
       });
     });
 
-    // 5. Read Receipts
-    socket.on("markAsRead", async ({ conversationId, userId }) => {
-      if (!conversationId || !userId) return;
+    // 6. Read Receipts (Enforcing authenticated userId)
+    socket.on("markAsRead", async ({ conversationId }) => {
+      if (!conversationId || !mongoose.Types.ObjectId.isValid(conversationId)) return;
 
       try {
+        const conversation = await Conversation.findById(conversationId).select("members");
+        if (!conversation?.members.some((m) => m.toString() === userId)) return;
+
         await Message.updateMany(
           {
             conversation: conversationId,
-            readBy: { $ne: userId },
+            readBy: { $ne: socket.user._id },
           },
           {
             $addToSet: {
-              readBy: userId,
-              deliveredTo: userId,
+              readBy: socket.user._id,
+              deliveredTo: socket.user._id,
             },
           }
         );
@@ -107,13 +197,16 @@ const registerChatSocket = (io) => {
       }
     });
 
-    // 6. WebRTC Video & Audio Calling (WhatsApp-style)
-    socket.on("call:initiate", ({ recipientId, conversationId, isVideo, caller, isGroup }) => {
-      const senderId = socketUserMap.get(socket.id) || (caller?._id || caller?.id);
-      if (!senderId) return;
-
+    // 7. WebRTC Video & Audio Calling (Enforcing verified caller ID)
+    socket.on("call:initiate", ({ recipientId, conversationId, isVideo, isGroup }) => {
       const payload = {
-        caller,
+        caller: {
+          _id: socket.user._id,
+          id: socket.user._id,
+          name: socket.user.name,
+          username: socket.user.username,
+          avatar: socket.user.avatar,
+        },
         conversationId,
         isVideo: !!isVideo,
         isGroup: !!isGroup,
@@ -126,10 +219,14 @@ const registerChatSocket = (io) => {
       }
     });
 
-    socket.on("call:accept", ({ callerId, recipient, conversationId, isVideo }) => {
+    socket.on("call:accept", ({ callerId, conversationId, isVideo }) => {
       if (!callerId) return;
       io.to(`user:${callerId}`).emit("call:accepted", {
-        recipient,
+        recipient: {
+          _id: socket.user._id,
+          name: socket.user.name,
+          avatar: socket.user.avatar,
+        },
         conversationId,
         isVideo: !!isVideo,
       });
@@ -137,9 +234,8 @@ const registerChatSocket = (io) => {
 
     socket.on("call:signal", ({ targetUserId, signal, type }) => {
       if (!targetUserId) return;
-      const senderId = socketUserMap.get(socket.id);
       io.to(`user:${targetUserId}`).emit("call:signal", {
-        senderId,
+        senderId: userId,
         signal,
         type,
       });
@@ -153,12 +249,11 @@ const registerChatSocket = (io) => {
     });
 
     socket.on("call:end", ({ targetUserId, conversationId }) => {
-      const senderId = socketUserMap.get(socket.id);
       if (targetUserId) {
-        io.to(`user:${targetUserId}`).emit("call:ended", { fromUserId: senderId });
+        io.to(`user:${targetUserId}`).emit("call:ended", { fromUserId: userId });
       }
       if (conversationId) {
-        socket.to(`conversation:${conversationId}`).emit("call:ended", { fromUserId: senderId });
+        socket.to(`conversation:${conversationId}`).emit("call:ended", { fromUserId: userId });
       }
     });
 
@@ -170,13 +265,11 @@ const registerChatSocket = (io) => {
       });
     });
 
-    // 7. Handle Disconnect
-
+    // 8. Handle Disconnect
     socket.on("disconnect", async () => {
-      const userId = socketUserMap.get(socket.id);
       socketUserMap.delete(socket.id);
 
-      if (userId && onlineUsers.has(userId)) {
+      if (onlineUsers.has(userId)) {
         const userSockets = onlineUsers.get(userId);
         userSockets.delete(socket.id);
 

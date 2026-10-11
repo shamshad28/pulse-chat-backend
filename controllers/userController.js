@@ -1,26 +1,53 @@
+const mongoose = require("mongoose");
 const User = require("../models/User");
 
-// Search users by name, username, or email
+// Helper to escape RegExp special characters to prevent ReDoS
+const escapeRegExp = (string) => {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+};
+
+// Helper to validate safe avatar URLs
+const isSafeAvatarUrl = (url) => {
+  if (!url || typeof url !== "string") return false;
+  const trimmed = url.trim();
+  if (trimmed.startsWith("/uploads/")) return true;
+  if (trimmed.startsWith("data:image/")) return true;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+// Search users by name or username (excl. email to prevent PII harvesting)
 const searchUsers = async (req, res) => {
   try {
     const { q } = req.query;
-    const queryStr = typeof q === "string" ? q.trim() : "";
+    const rawQuery = typeof q === "string" ? q.trim() : "";
+
+    if (!rawQuery) {
+      return res.status(200).json({
+        success: true,
+        users: [],
+      });
+    }
+
+    // Limit search term length to prevent ReDoS
+    const sanitizedQuery = escapeRegExp(rawQuery.slice(0, 40));
 
     const filter = {
       _id: { $ne: req.user._id },
+      $or: [
+        { name: { $regex: sanitizedQuery, $options: "i" } },
+        { username: { $regex: sanitizedQuery, $options: "i" } },
+      ],
     };
 
-    if (queryStr) {
-      filter.$or = [
-        { name: { $regex: queryStr, $options: "i" } },
-        { username: { $regex: queryStr, $options: "i" } },
-        { email: { $regex: queryStr, $options: "i" } },
-      ];
-    }
-
+    // Note: 'email' is deliberately excluded to protect private user data
     const users = await User.find(filter)
-      .select("name username email avatar status lastSeen")
-      .limit(30)
+      .select("name username avatar status lastSeen")
+      .limit(20)
       .sort({ name: 1 });
 
     res.status(200).json({
@@ -36,11 +63,11 @@ const searchUsers = async (req, res) => {
   }
 };
 
-// Get all users (contacts)
+// Get contacts (email is excluded to protect private user data)
 const getUsers = async (req, res) => {
   try {
     const users = await User.find({ _id: { $ne: req.user._id } })
-      .select("name username email avatar status lastSeen")
+      .select("name username avatar status lastSeen")
       .limit(50)
       .sort({ status: -1, updatedAt: -1 });
 
@@ -57,17 +84,65 @@ const getUsers = async (req, res) => {
   }
 };
 
+// Get current logged-in user profile (includes private data like email)
+const getMe = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select(
+      "name username email avatar status lastSeen createdAt"
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      user,
+    });
+  } catch (error) {
+    console.error("GetMe error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching profile",
+    });
+  }
+};
+
 // Update user profile
 const updateProfile = async (req, res) => {
   try {
     const { name, avatar } = req.body;
     const updateData = {};
 
-    if (typeof name === "string" && name.trim()) {
-      updateData.name = name.trim();
+    if (typeof name === "string") {
+      const trimmedName = name.trim();
+      if (trimmedName.length < 2 || trimmedName.length > 50) {
+        return res.status(400).json({
+          success: false,
+          message: "Name must be between 2 and 50 characters",
+        });
+      }
+      updateData.name = trimmedName;
     }
+
     if (typeof avatar === "string") {
-      updateData.avatar = avatar.trim();
+      const trimmedAvatar = avatar.trim();
+      if (trimmedAvatar && !isSafeAvatarUrl(trimmedAvatar)) {
+        return res.status(400).json({
+          success: false,
+          message: "Avatar must be a valid HTTP/HTTPS URL, uploaded file, or image data URL",
+        });
+      }
+      if (trimmedAvatar.length > 2000) {
+        return res.status(400).json({
+          success: false,
+          message: "Avatar URL is too long",
+        });
+      }
+      updateData.avatar = trimmedAvatar;
     }
 
     const user = await User.findByIdAndUpdate(
@@ -89,12 +164,26 @@ const updateProfile = async (req, res) => {
   }
 };
 
-// Get user by id
+// Get user by id (authorization: email only returned if self)
 const getUserById = async (req, res) => {
   try {
-    const user = await User.findById(req.params.userId).select(
-      "name username email avatar status lastSeen"
-    );
+    const { userId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid user ID format",
+      });
+    }
+
+    const isSelf = req.user._id.toString() === userId.toString();
+
+    // Select email only if the user is fetching their own profile
+    const selectFields = isSelf
+      ? "name username email avatar status lastSeen"
+      : "name username avatar status lastSeen";
+
+    const user = await User.findById(userId).select(selectFields);
 
     if (!user) {
       return res.status(404).json({
@@ -119,6 +208,7 @@ const getUserById = async (req, res) => {
 module.exports = {
   searchUsers,
   getUsers,
+  getMe,
   updateProfile,
   getUserById,
 };
