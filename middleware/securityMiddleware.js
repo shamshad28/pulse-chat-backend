@@ -126,10 +126,10 @@ const xssSanitizer = (req, res, next) => {
   next();
 };
 
-// Rate Limiters
+// Rate Limiters (Tuned for multi-user concurrent traffic)
 const globalLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
-  max: 150, // max 150 requests per minute
+  max: 1000, // 1000 requests per minute per IP to support multiple users on shared NAT/Wi-Fi
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -140,18 +140,20 @@ const globalLimiter = rateLimit({
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // max 20 login/register attempts per 15 minutes
+  max: 100, // 100 attempts per 15 minutes
   standardHeaders: true,
   legacyHeaders: false,
+  // CRITICAL: Do not count successful logins towards the rate limit, only failed brute-force attempts
+  skipSuccessfulRequests: true,
   message: {
     success: false,
-    message: "Too many authentication attempts. Please try again after 15 minutes.",
+    message: "Too many failed login attempts. Please try again after a few minutes.",
   },
 });
 
 const uploadLimiter = rateLimit({
   windowMs: 5 * 60 * 1000, // 5 minutes
-  max: 30, // max 30 upload requests per 5 minutes
+  max: 60, // 60 uploads per 5 minutes
   standardHeaders: true,
   legacyHeaders: false,
   message: {

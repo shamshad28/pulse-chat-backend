@@ -26,7 +26,12 @@ const connectDB = async () => {
   try {
     connectionPromise = mongoose.connect(mongoUri, {
       dbName: process.env.DB_NAME || "pulsechat",
+      maxPoolSize: 50,
+      minPoolSize: 5,
       serverSelectionTimeoutMS: 8000,
+      socketTimeoutMS: 45000,
+      connectTimeoutMS: 10000,
+      heartbeatFrequencyMS: 10000,
     });
 
     const conn = await connectionPromise;

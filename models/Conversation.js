@@ -53,4 +53,8 @@ const conversationSchema = new mongoose.Schema(
   }
 );
 
+// High-performance compound indexes for concurrent user lookups
+conversationSchema.index({ members: 1, updatedAt: -1 });
+conversationSchema.index({ type: 1, members: 1 });
+
 module.exports = mongoose.model("Conversation", conversationSchema);

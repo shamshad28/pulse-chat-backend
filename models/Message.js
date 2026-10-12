@@ -88,6 +88,10 @@ const messageSchema = new mongoose.Schema(
   }
 );
 
+// High-performance indexes for concurrent chat message loading and unread count aggregation
+messageSchema.index({ conversation: 1, createdAt: -1 });
+messageSchema.index({ conversation: 1, sender: 1, readBy: 1 });
+messageSchema.index({ conversation: 1, deliveredTo: 1 });
 messageSchema.index({ content: "text" });
 
 module.exports = mongoose.model("Message", messageSchema);

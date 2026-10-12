@@ -69,6 +69,8 @@ const registerChatSocket = (io) => {
     // Bind socket to authenticated user
     socketUserMap.set(socket.id, userId);
 
+    const isFirstConnection = !onlineUsers.has(userId) || onlineUsers.get(userId).size === 0;
+
     if (!onlineUsers.has(userId)) {
       onlineUsers.set(userId, new Set());
     }
@@ -77,24 +79,25 @@ const registerChatSocket = (io) => {
     // Securely join private room for this verified user
     socket.join(`user:${userId}`);
 
-    try {
-      // Update user status in DB
-      await User.findByIdAndUpdate(userId, {
-        status: "online",
-        lastSeen: null,
-      });
+    // Send back list of all currently online users to THIS connecting socket immediately
+    socket.emit("onlineUsers:list", Array.from(onlineUsers.keys()));
 
-      // Broadcast to all clients that this user is online
-      io.emit("presence:update", {
-        userId,
-        status: "online",
-        lastSeen: null,
-      });
+    // Only update database & broadcast presence if this is the user's FIRST active connection
+    if (isFirstConnection) {
+      try {
+        User.findByIdAndUpdate(userId, {
+          status: "online",
+          lastSeen: null,
+        }).catch((err) => console.warn("Status update non-fatal error:", err.message));
 
-      // Send back list of all currently online users
-      socket.emit("onlineUsers:list", Array.from(onlineUsers.keys()));
-    } catch (err) {
-      console.error("Error setting user online:", err.message);
+        io.emit("presence:update", {
+          userId,
+          status: "online",
+          lastSeen: null,
+        });
+      } catch (err) {
+        console.error("Error setting user online:", err.message);
+      }
     }
 
     // 2. Client setup event (acknowledgement)
@@ -265,8 +268,8 @@ const registerChatSocket = (io) => {
       });
     });
 
-    // 8. Handle Disconnect
-    socket.on("disconnect", async () => {
+    // 8. Handle Disconnect (Debounced to prevent flapping during page refresh)
+    socket.on("disconnect", () => {
       socketUserMap.delete(socket.id);
 
       if (onlineUsers.has(userId)) {
@@ -274,23 +277,29 @@ const registerChatSocket = (io) => {
         userSockets.delete(socket.id);
 
         if (userSockets.size === 0) {
-          onlineUsers.delete(userId);
-          const now = new Date();
+          // Give 3.5 seconds grace period for tab switch or page refresh
+          setTimeout(async () => {
+            const currentSockets = onlineUsers.get(userId);
+            if (!currentSockets || currentSockets.size === 0) {
+              onlineUsers.delete(userId);
+              const now = new Date();
 
-          try {
-            await User.findByIdAndUpdate(userId, {
-              status: "offline",
-              lastSeen: now,
-            });
+              try {
+                await User.findByIdAndUpdate(userId, {
+                  status: "offline",
+                  lastSeen: now,
+                });
 
-            io.emit("presence:update", {
-              userId,
-              status: "offline",
-              lastSeen: now,
-            });
-          } catch (err) {
-            console.error("Error setting user offline:", err.message);
-          }
+                io.emit("presence:update", {
+                  userId,
+                  status: "offline",
+                  lastSeen: now,
+                });
+              } catch (err) {
+                console.error("Error setting user offline:", err.message);
+              }
+            }
+          }, 3500);
         }
       }
     });

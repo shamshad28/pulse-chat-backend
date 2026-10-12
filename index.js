@@ -1,3 +1,6 @@
+// Maximize Node.js thread pool for concurrent bcrypt and crypto operations
+process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || "64";
+
 require("dotenv").config({ path: __dirname + "/.env" });
 
 const express = require("express");
@@ -26,6 +29,9 @@ const {
 
 const app = express();
 const server = http.createServer(app);
+
+// Enable trust proxy so rate limiters and logging inspect the real client IP behind reverse proxies (Vercel, Render, Railway, Nginx)
+app.set("trust proxy", 1);
 
 // 1. Scanner & Exploit Probe Blocker (Top of middleware stack)
 app.use(probeBlocker);
@@ -62,6 +68,9 @@ const allowedOrigins = [
   .filter(Boolean)
   .map((url) => url.replace(/\/+$/, ""));
 
+// Private IP ranges regex for local network devices (smartphones, tablets on Wi-Fi)
+const LAN_ORIGIN_REGEX = /^https?:\/\/(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$/;
+
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
@@ -70,7 +79,8 @@ const corsOptions = {
       allowedOrigins.includes(cleanOrigin) ||
       cleanOrigin.startsWith("http://localhost:") ||
       cleanOrigin.startsWith("http://127.0.0.1:") ||
-      cleanOrigin.endsWith(".vercel.app")
+      cleanOrigin.endsWith(".vercel.app") ||
+      LAN_ORIGIN_REGEX.test(cleanOrigin)
     ) {
       return callback(null, true);
     }

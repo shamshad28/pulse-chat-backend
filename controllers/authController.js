@@ -97,8 +97,8 @@ const register = async (req, res) => {
       });
     }
 
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 12);
+    // Hash password with optimal OWASP rounds (10) for high-concurrency throughput
+    const hashedPassword = await bcrypt.hash(password, 10);
 
     // Create user
     const user = await User.create({
@@ -211,10 +211,10 @@ const login = async (req, res) => {
       });
     }
 
-    // Update status
-    user.status = "online";
-    user.lastSeen = null;
-    await user.save();
+    // Fast atomic status update (bypasses full document validation overhead)
+    User.updateOne({ _id: user._id }, { status: "online", lastSeen: null }).catch((err) =>
+      console.warn("Login status update error:", err.message)
+    );
 
     // Generate JWT
     const token = generateToken(user._id);
