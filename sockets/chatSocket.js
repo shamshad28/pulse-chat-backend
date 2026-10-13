@@ -268,6 +268,12 @@ const registerChatSocket = (io) => {
       });
     });
 
+    // Real-time Status / Story Updates
+    socket.on("status:new", (statusData) => {
+      if (!statusData) return;
+      socket.broadcast.emit("status:broadcast", statusData);
+    });
+
     // 8. Handle Disconnect (Debounced to prevent flapping during page refresh)
     socket.on("disconnect", () => {
       socketUserMap.delete(socket.id);
