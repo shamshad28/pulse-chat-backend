@@ -10,6 +10,7 @@ const {
   updateGroupSettings,
   deleteConversation,
   clearConversationMessages,
+  getOrCreateCommunity,
 } = require("../controllers/conversationController");
 const protect = require("../middleware/authMiddleware");
 
@@ -19,6 +20,7 @@ router.use(protect);
 
 router.post("/direct", createDirectConversation);
 router.post("/group", createGroupConversation);
+router.post("/community", getOrCreateCommunity);
 router.get("/", getMyConversations);
 router.get("/:conversationId", getConversationById);
 router.put("/:conversationId", updateGroupSettings);

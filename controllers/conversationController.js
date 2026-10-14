@@ -727,6 +727,136 @@ const clearConversationMessages = async (req, res) => {
   }
 };
 
+// Get or create a community conversation (e.g. Nexcore Tech Community)
+const getOrCreateCommunity = async (req, res) => {
+  try {
+    const { name = "Nexcore Tech Community", subgroup = "" } = req.body;
+    const targetName = subgroup ? `${name} - ${subgroup}` : name;
+
+    // 1. Look for existing conversation by exact target name that current user is already in
+    let conversation = await Conversation.findOne({
+      name: { $regex: new RegExp(`^${targetName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+      members: req.user._id,
+    })
+      .populate("members", "name username avatar status lastSeen")
+      .populate("admins", "name username avatar")
+      .populate("createdBy", "name username avatar")
+      .populate({
+        path: "lastMessage",
+        populate: { path: "sender", select: "name username avatar" },
+      });
+
+    if (conversation) {
+      return res.status(200).json({
+        success: true,
+        conversation,
+      });
+    }
+
+    // 2. Also check if any Nexcore group exists where user is already a member
+    if (!subgroup) {
+      const anyNexcore = await Conversation.findOne({
+        name: { $regex: /nexcore/i },
+        members: req.user._id,
+      })
+        .populate("members", "name username avatar status lastSeen")
+        .populate("admins", "name username avatar")
+        .populate("createdBy", "name username avatar")
+        .populate({
+          path: "lastMessage",
+          populate: { path: "sender", select: "name username avatar" },
+        });
+
+      if (anyNexcore) {
+        return res.status(200).json({
+          success: true,
+          conversation: anyNexcore,
+        });
+      }
+    }
+
+    // 3. Look for existing group conversation with that target name created by anyone
+    conversation = await Conversation.findOne({
+      name: { $regex: new RegExp(`^${targetName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+      type: "group",
+    });
+
+    if (conversation) {
+      const isMember = conversation.members.some(
+        (m) => m.toString() === req.user._id.toString()
+      );
+      if (!isMember) {
+        conversation.members.push(req.user._id);
+        await conversation.save();
+      }
+
+      const populated = await Conversation.findById(conversation._id)
+        .populate("members", "name username avatar status lastSeen")
+        .populate("admins", "name username avatar")
+        .populate("createdBy", "name username avatar")
+        .populate({
+          path: "lastMessage",
+          populate: { path: "sender", select: "name username avatar" },
+        });
+
+      return res.status(200).json({
+        success: true,
+        conversation: populated,
+      });
+    }
+
+    // 4. Create new community group with current user and other available users
+    const otherUsers = await User.find({ _id: { $ne: req.user._id } }).limit(5);
+    const memberIds = [req.user._id, ...otherUsers.map((u) => u._id)];
+
+    const newGroup = await Conversation.create({
+      type: "group",
+      name: targetName,
+      members: memberIds,
+      admins: [req.user._id],
+      createdBy: req.user._id,
+    });
+
+    const welcomeMsg = await Message.create({
+      conversation: newGroup._id,
+      sender: req.user._id,
+      content: `👋 Welcome to ${targetName}! This is the official community space for announcements and discussions.`,
+      type: "text",
+    });
+
+    newGroup.lastMessage = welcomeMsg._id;
+    await newGroup.save();
+
+    const populatedGroup = await Conversation.findById(newGroup._id)
+      .populate("members", "name username avatar status lastSeen")
+      .populate("admins", "name username avatar")
+      .populate("createdBy", "name username avatar")
+      .populate({
+        path: "lastMessage",
+        populate: { path: "sender", select: "name username avatar" },
+      });
+
+    const io = req.app.get("io");
+    if (io) {
+      memberIds.forEach((mId) => {
+        io.to(`user:${mId}`).emit("conversation:new", populatedGroup);
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: "Community conversation created",
+      conversation: populatedGroup,
+    });
+  } catch (error) {
+    console.error("Get or create community error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+};
+
 module.exports = {
   createDirectConversation,
   createGroupConversation,
@@ -738,4 +868,5 @@ module.exports = {
   updateGroupSettings,
   deleteConversation,
   clearConversationMessages,
+  getOrCreateCommunity,
 };

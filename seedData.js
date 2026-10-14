@@ -143,25 +143,7 @@ const seedDatabase = async () => {
     convFamily.lastMessage = msgFamily._id;
     await convFamily.save();
 
-    // C. "Muslim Community" - Group chat (~FALAHCODE: We are seeking ..., 9:56 am)
-    const convCommunity = await Conversation.create({
-      type: "group",
-      name: "Muslim Community",
-      members: [shamshad._id, userMap["muaztheem"]._id, userMap["afreen"]._id],
-      admins: [shamshad._id],
-      createdBy: userMap["muaztheem"]._id,
-      updatedAt: new Date(now.getTime() - 17 * 60 * 1000),
-    });
-    const msgCommunity = await Message.create({
-      conversation: convCommunity._id,
-      sender: userMap["muaztheem"]._id,
-      content: "~FALAHCODE: We are seeking volunteers for the upcoming community charity drive",
-      createdAt: new Date(now.getTime() - 17 * 60 * 1000),
-    });
-    convCommunity.lastMessage = msgCommunity._id;
-    await convCommunity.save();
-
-    // D. "Priya Mali" - Direct chat (✓ Day 440, 9:48 am)
+    // C. "Priya Mali" - Direct chat (✓ Day 440, 9:48 am)
     const convPriya = await Conversation.create({
       type: "direct",
       members: [shamshad._id, userMap["priyamali"]._id],
